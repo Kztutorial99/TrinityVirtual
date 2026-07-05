@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#1A1A2E</color>
+    <color name="primary_dark">#16213E</color>
+    <color name="accent">#0F3460</color>
+    <color name="accent_bright">#E94560</color>
+    <color name="surface">#1E1E2E</color>
+    <color name="surface_variant">#2A2A3E</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="on_surface">#E0E0E0</color>
+    <color name="on_surface_variant">#A0A0B0</color>
+    <color name="root_active">#1B5E20</color>
+    <color name="root_inactive">#4A4A5A</color>
+    <color name="root_badge">#FF6D00</color>
+    <color name="module_xposed">#7C4DFF</color>
+    <color name="module_spoof">#00BCD4</color>
+    <color name="module_hook">#FF5722</color>
+    <color name="module_system">#4CAF50</color>
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+</resources>
