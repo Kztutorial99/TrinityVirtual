@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.os.Build
 import com.trinityvirtual.model.VirtualApp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -26,29 +27,38 @@ object VirtualCore {
         dataDir = File(ctx.filesDir, "app_data").also { it.mkdirs() }
     }
 
+    @Suppress("DEPRECATION")
     suspend fun installApk(sourceApkPath: String): VirtualApp? = withContext(Dispatchers.IO) {
         try {
             val pm = ctx.packageManager
-            val packageInfo = pm.getPackageArchiveInfo(
-                sourceApkPath,
-                PackageManager.GET_META_DATA
-            ) ?: return@withContext null
+            val sourceFile = File(sourceApkPath)
+
+            if (!sourceFile.exists() || sourceFile.length() == 0L) return@withContext null
+
+            val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getPackageArchiveInfo(sourceApkPath, PackageManager.PackageInfoFlags.of(0L))
+            } else {
+                pm.getPackageArchiveInfo(sourceApkPath, 0)
+            } ?: return@withContext null
 
             val appInfo = packageInfo.applicationInfo ?: return@withContext null
             appInfo.sourceDir = sourceApkPath
             appInfo.publicSourceDir = sourceApkPath
 
-            val appName = pm.getApplicationLabel(appInfo).toString()
-            val packageName = packageInfo.packageName
+            val appName = try {
+                pm.getApplicationLabel(appInfo).toString()
+            } catch (e: Exception) {
+                packageInfo.packageName ?: "Unknown App"
+            }
+
+            val packageName = packageInfo.packageName ?: return@withContext null
             val versionName = packageInfo.versionName ?: "1.0"
-            val sourceFile = File(sourceApkPath)
             val destFile = File(virtualDir, "${packageName}_${System.currentTimeMillis()}.apk")
             sourceFile.copyTo(destFile, overwrite = true)
 
             val icon = try { pm.getApplicationIcon(appInfo) } catch (e: Exception) { null }
             val iconPath = icon?.let { saveIcon(it, packageName) }
 
-            // Create isolated data dir for this virtual app
             File(dataDir, packageName).mkdirs()
 
             VirtualApp(
@@ -60,7 +70,7 @@ object VirtualCore {
                 sizeBytes = destFile.length()
             )
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("VirtualCore", "installApk failed: ${e.message}", e)
             null
         }
     }
@@ -69,8 +79,8 @@ object VirtualCore {
         return try {
             val bitmap = drawableToBitmap(drawable)
             val iconFile = File(iconDir, "$packageName.png")
-            FileOutputStream(iconFile).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            FileOutputStream(iconFile).use { fos ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 90, fos)
             }
             iconFile.absolutePath
         } catch (e: Exception) { null }
@@ -78,21 +88,39 @@ object VirtualCore {
 
     private fun drawableToBitmap(drawable: Drawable): Bitmap {
         if (drawable is BitmapDrawable && drawable.bitmap != null) return drawable.bitmap
-        val bmp = Bitmap.createBitmap(
-            drawable.intrinsicWidth.coerceAtLeast(1),
-            drawable.intrinsicHeight.coerceAtLeast(1),
-            Bitmap.Config.ARGB_8888
-        )
-        val canvas = Canvas(bmp)
+        val w = drawable.intrinsicWidth.takeIf { it > 0 } ?: 96
+        val h = drawable.intrinsicHeight.takeIf { it > 0 } ?: 96
+        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
         drawable.setBounds(0, 0, canvas.width, canvas.height)
         drawable.draw(canvas)
-        return bmp
+        return bitmap
     }
 
-    fun deleteApp(apkPath: String) {
-        File(apkPath).delete()
+    suspend fun getInstalledApps(): List<VirtualApp> = withContext(Dispatchers.IO) {
+        try {
+            virtualDir.listFiles { f -> f.extension == "apk" }
+                ?.mapNotNull { apkFile ->
+                    val pm = ctx.packageManager
+                    @Suppress("DEPRECATION")
+                    val pi = pm.getPackageArchiveInfo(apkFile.absolutePath, 0) ?: return@mapNotNull null
+                    val ai = pi.applicationInfo ?: return@mapNotNull null
+                    ai.sourceDir = apkFile.absolutePath
+                    ai.publicSourceDir = apkFile.absolutePath
+                    VirtualApp(
+                        appName = try { pm.getApplicationLabel(ai).toString() } catch (e: Exception) { pi.packageName },
+                        packageName = pi.packageName,
+                        apkPath = apkFile.absolutePath,
+                        versionName = pi.versionName ?: "1.0",
+                        sizeBytes = apkFile.length()
+                    )
+                } ?: emptyList()
+        } catch (e: Exception) { emptyList() }
     }
 
-    fun getVirtualDir(): File = virtualDir
-    fun getAppDataDir(packageName: String): File = File(dataDir, packageName).also { it.mkdirs() }
+    suspend fun deleteApp(apkPath: String) = withContext(Dispatchers.IO) {
+        try { File(apkPath).delete() } catch (e: Exception) { }
+    }
+
+    fun isInitialized() = ::ctx.isInitialized
 }
