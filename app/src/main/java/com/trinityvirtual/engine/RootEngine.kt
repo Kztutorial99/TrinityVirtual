@@ -60,6 +60,10 @@ object RootEngine {
      */
     suspend fun startRootEnvironment(): Boolean = withContext(Dispatchers.IO) {
         try {
+            if (!::preloadLib.isInitialized) {
+                Log.e(TAG, "RootEngine.init() belum dipanggil — panggil init(context) di onCreate terlebih dahulu")
+                return@withContext false
+            }
             if (!preloadLib.exists()) {
                 Log.e(TAG, "libfakeroot_preload.so not found in nativeLibraryDir — cannot inject")
                 Log.e(TAG, "  expected: ${preloadLib.absolutePath}")
@@ -85,6 +89,7 @@ object RootEngine {
     }
 
     suspend fun stopRootEnvironment() = withContext(Dispatchers.IO) {
+        if (!::preloadLib.isInitialized) return@withContext
         try {
             nativeStopRootNamespace()
             isRootActive = false
