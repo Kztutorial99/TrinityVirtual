@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    name: Build Debug + Release APK
+    name: Build & Sign APK
     runs-on: ubuntu-latest
 
     steps:
@@ -31,6 +31,14 @@ jobs:
           sdkmanager --install "ndk;25.2.9519653" "cmake;3.22.1" 2>&1 | tail -5
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
 
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/keystore.p12
+          echo "KEYSTORE_FILE=keystore.p12" >> $GITHUB_ENV
+          echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+          echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
+
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -43,24 +51,34 @@ jobs:
       - name: Grant Gradle execute permission
         run: chmod +x gradlew
 
-      - name: Build Debug APK
+      - name: Build & Sign Debug APK
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Upload Debug APK
+      - name: Build & Sign Release APK
+        run: ./gradlew assembleRelease --stacktrace
+        env:
+          KEYSTORE_FILE: keystore.p12
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Verify APK Signature
+        run: |
+          BUILD_TOOLS=$ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools/ | sort -V | tail -1)
+          echo "=== Debug APK ===" && $BUILD_TOOLS/apksigner verify --verbose app/build/outputs/apk/debug/*.apk | head -5
+          echo "=== Release APK ===" && $BUILD_TOOLS/apksigner verify --verbose app/build/outputs/apk/release/*.apk | head -5
+
+      - name: Upload Signed Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: TrinityVirtual-debug-${{ github.run_number }}
+          name: TrinityVirtual-debug-signed-${{ github.run_number }}
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 30
 
-      - name: Build Release APK (unsigned)
-        run: ./gradlew assembleRelease --stacktrace
-        continue-on-error: true
-
-      - name: Upload Release APK
+      - name: Upload Signed Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: TrinityVirtual-release-${{ github.run_number }}
+          name: TrinityVirtual-release-signed-${{ github.run_number }}
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
 
@@ -74,12 +92,11 @@ jobs:
             app/build/outputs/apk/release/*.apk
           body: |
             ## TrinityVirtual ${{ github.ref_name }}
+            ✅ Signed Release APK — ready to install!
             ### Features
             - Virtual Android Environment (Hybrid Container + Root Layer)
             - Virtual Root (fake su via namespace isolation)
             - Device Spoof (Manufacturer, Model, Fingerprint, IMEI, Android ID)
-            - GPS Spoof
-            - Module Manager (Xposed/Hook/Spoof/System modules)
-            - APK installer into virtual space
+            - GPS Spoof & Module Manager
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
