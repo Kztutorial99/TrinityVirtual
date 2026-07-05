@@ -11,6 +11,7 @@ class TrinityApplication : Application() {
     override fun onCreate() {
         super.onCreate()
 
+        TrinityApp.init(this)
         CrashReporter.init(this)
 
         try {
