@@ -103,11 +103,16 @@ object RootEngine {
 
     fun checkRootStatus(): RootStatus {
         return try {
-            val uid = nativeGetEffectiveUid()
             when {
-                uid == 0 && isRootActive -> RootStatus.VIRTUAL_ROOT
-                uid == 0                 -> RootStatus.ROOTED        // unexpected real root
-                else                     -> RootStatus.NO_ROOT
+                // isRootActive adalah sumber kebenaran utama.
+                // nativeGetEffectiveUid() selalu return UID asli (10306) di host process
+                // karena dlopen RTLD_GLOBAL tidak bisa retroaktif hook geteuid() yang
+                // sudah resolved di GOT — hook hanya aktif untuk child process baru.
+                isRootActive -> RootStatus.VIRTUAL_ROOT
+                else -> {
+                    val uid = nativeGetEffectiveUid()
+                    if (uid == 0) RootStatus.ROOTED else RootStatus.NO_ROOT
+                }
             }
         } catch (e: Exception) {
             RootStatus.NO_ROOT
