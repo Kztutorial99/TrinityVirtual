@@ -1,93 +1,140 @@
+/**
+ * root_engine.cpp — TrinityVirtual JNI bridge for virtual root
+ *
+ * Delegates to the LD_PRELOAD injection engine instead of the former
+ * mount-namespace approach (unshare(CLONE_NEWNS) blocked by SELinux
+ * on Android 12+ untrusted_app domain).
+ *
+ * The second argument to nativeStartRootNamespace is now the absolute path to
+ * libfakeroot_preload.so (from nativeLibraryDir), NOT a fake-su binary path.
+ * The fake-su shell script is deployed by setup_ld_preload_injection() itself.
+ */
+
 #include <jni.h>
 #include <string>
+#include <stdlib.h>
 #include <unistd.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <sched.h>
 #include <android/log.h>
 #include "namespace_manager.h"
 #include "su_interceptor.h"
 
 #define TAG "TrinityRoot"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-static bool g_root_active = false;
-static int g_root_ns_fd = -1;
+static bool g_root_active  = false;
+static char g_su_path[512] = {};   // path to the deployed fake-su script
 
 extern "C" {
 
+// ─────────────────────────────────────────────────────────────────────────────
+// nativeStartRootNamespace
+//
+// Kotlin: nativeStartRootNamespace(rootDir: String, preloadLibPath: String): Int
+//
+//   rootDir        — app private dir for the virtual root env (files/root_engine)
+//   preloadLibPath — absolute path to libfakeroot_preload.so (nativeLibraryDir)
+//
+// Returns 0 on success, non-zero on error.
+// ─────────────────────────────────────────────────────────────────────────────
 JNIEXPORT jint JNICALL
 Java_com_trinityvirtual_engine_RootEngine_nativeStartRootNamespace(
-        JNIEnv *env, jobject thiz,
-        jstring root_dir, jstring su_path) {
+        JNIEnv* env, jobject /*thiz*/,
+        jstring root_dir_j, jstring preload_lib_j) {
 
-    const char *root_dir_str = env->GetStringUTFChars(root_dir, nullptr);
-    const char *su_path_str = env->GetStringUTFChars(su_path, nullptr);
+    const char* dir = env->GetStringUTFChars(root_dir_j,    nullptr);
+    const char* lib = env->GetStringUTFChars(preload_lib_j, nullptr);
 
-    LOGI("Starting virtual root namespace: %s", root_dir_str);
+    LOGI("Starting LD_PRELOAD virtual root");
+    LOGI("  rootDir    : %s", dir);
+    LOGI("  preloadLib : %s", lib);
 
-    // Create isolated mount namespace
-    int result = create_virtual_namespace(root_dir_str, su_path_str);
+    // Build expected fake-su path for interceptor diagnostics
+    std::string su = std::string(dir) + "/su";
+    __builtin_strncpy(g_su_path, su.c_str(), sizeof(g_su_path) - 1);
 
-    if (result == 0) {
+    int rc = setup_ld_preload_injection(dir, lib);
+
+    if (rc == 0) {
         g_root_active = true;
-        // Install su interceptor hooks
-        install_su_interceptor(su_path_str);
-        LOGI("Virtual root namespace active");
+        install_su_interceptor(g_su_path);
+        LOGI("Virtual root (LD_PRELOAD) active — no mount namespace used");
     } else {
-        LOGE("Failed to create namespace: %d", result);
+        LOGE("LD_PRELOAD injection failed: rc=%d", rc);
     }
 
-    env->ReleaseStringUTFChars(root_dir, root_dir_str);
-    env->ReleaseStringUTFChars(su_path, su_path_str);
-    return result;
+    env->ReleaseStringUTFChars(root_dir_j,    dir);
+    env->ReleaseStringUTFChars(preload_lib_j, lib);
+    return (jint)rc;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// nativeStopRootNamespace
+// ─────────────────────────────────────────────────────────────────────────────
 JNIEXPORT jint JNICALL
 Java_com_trinityvirtual_engine_RootEngine_nativeStopRootNamespace(
-        JNIEnv *env, jobject thiz) {
+        JNIEnv* /*env*/, jobject /*thiz*/) {
+
     if (g_root_active) {
         uninstall_su_interceptor();
-        destroy_virtual_namespace();
-        g_root_active = false;
-        if (g_root_ns_fd != -1) {
-            close(g_root_ns_fd);
-            g_root_ns_fd = -1;
-        }
-        LOGI("Virtual root namespace stopped");
+        teardown_ld_preload_injection();
+        g_root_active  = false;
+        g_su_path[0]   = '\0';
+        LOGI("Virtual root stopped");
     }
     return 0;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// nativeGetEffectiveUid
+// After injection, geteuid() is hooked inside this process to return 0.
+// ─────────────────────────────────────────────────────────────────────────────
 JNIEXPORT jint JNICALL
 Java_com_trinityvirtual_engine_RootEngine_nativeGetEffectiveUid(
-        JNIEnv *env, jobject thiz) {
+        JNIEnv* /*env*/, jobject /*thiz*/) {
     return (jint)geteuid();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// nativeExecuteRoot
+// Runs a shell command. popen() inherits the process environment, so LD_PRELOAD
+// is already set and the child process loads libfakeroot_preload.so automatically.
+// ─────────────────────────────────────────────────────────────────────────────
 JNIEXPORT jstring JNICALL
 Java_com_trinityvirtual_engine_RootEngine_nativeExecuteRoot(
-        JNIEnv *env, jobject thiz, jstring command) {
-    const char *cmd = env->GetStringUTFChars(command, nullptr);
+        JNIEnv* env, jobject /*thiz*/, jstring command_j) {
+
+    const char* cmd = env->GetStringUTFChars(command_j, nullptr);
     std::string result;
 
     if (g_root_active) {
-        FILE *pipe = popen(cmd, "r");
+        FILE* pipe = popen(cmd, "r");
         if (pipe) {
-            char buffer[256];
-            while (fgets(buffer, sizeof(buffer), pipe)) {
-                result += buffer;
-            }
+            char buf[256];
+            while (fgets(buf, sizeof(buf), pipe)) result += buf;
             pclose(pipe);
+        } else {
+            result = "Error: popen failed";
+            LOGE("popen failed for command: %s", cmd);
         }
     } else {
         result = "Error: Virtual root not active";
+        LOGE("nativeExecuteRoot called while root not active");
     }
 
-    env->ReleaseStringUTFChars(command, cmd);
+    env->ReleaseStringUTFChars(command_j, cmd);
     return env->NewStringUTF(result.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// nativeIsInjectionActive
+// ─────────────────────────────────────────────────────────────────────────────
+JNIEXPORT jboolean JNICALL
+Java_com_trinityvirtual_engine_RootEngine_nativeIsInjectionActive(
+        JNIEnv* /*env*/, jobject /*thiz*/) {
+    return (jboolean)(is_injection_active() ? JNI_TRUE : JNI_FALSE);
 }
 
 } // extern "C"
