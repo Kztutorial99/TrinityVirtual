@@ -8,24 +8,20 @@
     app:cardCornerRadius="12dp"
     app:cardBackgroundColor="@color/surface_variant"
     app:cardElevation="2dp">
-
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:padding="8dp">
-
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:gravity="center">
-
             <ImageView
                 android:id="@+id/ivAppIcon"
                 android:layout_width="48dp"
                 android:layout_height="48dp"
                 android:scaleType="centerCrop"/>
-
             <TextView
                 android:id="@+id/tvAppName"
                 android:layout_width="match_parent"
@@ -37,14 +33,13 @@
                 android:maxLines="2"
                 android:ellipsize="end"/>
         </LinearLayout>
-
         <ImageView
             android:id="@+id/ivRootBadge"
             android:layout_width="16dp"
             android:layout_height="16dp"
             android:layout_gravity="top|end"
             android:src="@android:drawable/star_on"
-            android:imageTintList="@color/root_badge"
+            android:tint="@color/root_badge"
             android:visibility="gone"/>
     </FrameLayout>
 </androidx.cardview.widget.CardView>
