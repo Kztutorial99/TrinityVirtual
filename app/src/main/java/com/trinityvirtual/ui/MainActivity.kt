@@ -134,6 +134,7 @@ class MainActivity : AppCompatActivity() {
         try { DeviceSpoofManager.init(this) } catch (e: Throwable) {
             Log.e("TrinityMain", "Spoof init error (non-fatal)", e)
         }
+        RootEngine.init(this)   // FIX: wajib sebelum toggleRoot / startRootEnvironment
 
         setupBottomNav()
         setupHomePage()
