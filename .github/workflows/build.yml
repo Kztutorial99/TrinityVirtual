@@ -23,11 +23,13 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Setup Android SDK
+      - name: Setup Android SDK + NDK
         uses: android-actions/setup-android@v3
 
-      - name: Install NDK
-        run: echo "y" | $ANDROID_HOME/tools/bin/sdkmanager --install "ndk;25.2.9519653" "cmake;3.22.1"
+      - name: Install NDK via sdkmanager
+        run: |
+          sdkmanager --install "ndk;25.2.9519653" "cmake;3.22.1" 2>&1 | tail -5
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
 
       - name: Cache Gradle
         uses: actions/cache@v4
@@ -43,8 +45,6 @@ jobs:
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/25.2.9519653
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
@@ -56,8 +56,6 @@ jobs:
       - name: Build Release APK (unsigned)
         run: ./gradlew assembleRelease --stacktrace
         continue-on-error: true
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/25.2.9519653
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
