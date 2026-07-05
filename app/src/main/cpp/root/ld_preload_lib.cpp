@@ -9,10 +9,17 @@
  *
  * Intercepted symbols:
  *   getuid / geteuid / getgid / getegid  → return 0  (root UID/GID)
- *   access(su_path, ...)                 → return 0  (file present & executable)
- *   faccessat(su_path, ...)              → return 0
+ *   access / faccessat (su paths)        → return 0  (file present & exec)
  *   stat / lstat / __xstat / __lxstat    → fake executable stat for su paths
- *   open(su_path, O_RDONLY)              → redirect to /dev/null (safe read)
+ *   open (su paths, O_RDONLY)            → redirect to /dev/null (safe read)
+ *
+ * Thread-safety:
+ *   All RTLD_NEXT lookups use C++11 guaranteed thread-safe static-local
+ *   initialisation (ISO C++11 §6.7 [stmt.dcl] ¶4). No mutex needed.
+ *
+ * ABI compatibility:
+ *   Compiled for arm64-v8a / armeabi-v7a / x86_64 as declared in
+ *   app/build.gradle → ndk { abiFilters }.
  */
 
 #define _GNU_SOURCE
@@ -29,7 +36,7 @@
 #define FAKETAG "FakeRoot"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, FAKETAG, __VA_ARGS__)
 
-// ── Known su binary paths ──────────────────────────────────────────────────
+// ── Known su binary locations ──────────────────────────────────────────────
 static const char* const SU_PATHS[] = {
     "/system/bin/su",
     "/system/xbin/su",
@@ -43,11 +50,22 @@ static const char* const SU_PATHS[] = {
 
 static bool is_su_path(const char* path) {
     if (!path) return false;
-    for (int i = 0; SU_PATHS[i] != nullptr; i++) {
+    for (int i = 0; SU_PATHS[i] != nullptr; i++)
         if (__builtin_strcmp(path, SU_PATHS[i]) == 0) return true;
-    }
     return false;
 }
+
+// ── Resolve real libc symbol exactly once, thread-safely ──────────────────
+//
+//   C++11 §6.7 ¶4: "If control enters the declaration concurrently while
+//   the variable is being initialized, the concurrent execution shall wait
+//   for completion of the initialization."
+//
+//   Pattern used throughout this file:
+//     static const SomeFn real_fn = (SomeFn)dlsym(RTLD_NEXT, "symbol");
+//
+//   The initialiser runs once and is protected by the compiler-generated
+//   guard variable.  Subsequent calls use the cached pointer directly.
 
 // ── UID / GID overrides ────────────────────────────────────────────────────
 
@@ -73,7 +91,7 @@ gid_t getegid(void) {
     return 0;
 }
 
-// ── access() — su paths appear present & executable ───────────────────────
+// ── access() ──────────────────────────────────────────────────────────────
 
 __attribute__((visibility("default")))
 int access(const char* pathname, int mode) {
@@ -81,10 +99,9 @@ int access(const char* pathname, int mode) {
         LOGD("access(%s, %d) → 0 (faked su)", pathname, mode);
         return 0;
     }
-    typedef int (*fn_t)(const char*, int);
-    static fn_t real_fn = nullptr;
-    if (!real_fn) real_fn = (fn_t)dlsym(RTLD_NEXT, "access");
-    return real_fn ? real_fn(pathname, mode) : -1;
+    typedef int (*Fn)(const char*, int);
+    static const Fn real = (Fn)dlsym(RTLD_NEXT, "access");   // thread-safe init
+    return real ? real(pathname, mode) : -1;
 }
 
 // ── faccessat() ───────────────────────────────────────────────────────────
@@ -95,13 +112,12 @@ int faccessat(int dirfd, const char* pathname, int mode, int flags) {
         LOGD("faccessat(%s) → 0 (faked su)", pathname);
         return 0;
     }
-    typedef int (*fn_t)(int, const char*, int, int);
-    static fn_t real_fn = nullptr;
-    if (!real_fn) real_fn = (fn_t)dlsym(RTLD_NEXT, "faccessat");
-    return real_fn ? real_fn(dirfd, pathname, mode, flags) : -1;
+    typedef int (*Fn)(int, const char*, int, int);
+    static const Fn real = (Fn)dlsym(RTLD_NEXT, "faccessat"); // thread-safe init
+    return real ? real(dirfd, pathname, mode, flags) : -1;
 }
 
-// ── Shared fake stat filler ────────────────────────────────────────────────
+// ── Shared stat filler ────────────────────────────────────────────────────
 
 static void fill_fake_su_stat(struct stat* buf) {
     memset(buf, 0, sizeof(*buf));
@@ -114,65 +130,67 @@ static void fill_fake_su_stat(struct stat* buf) {
     buf->st_blocks  = 4;
 }
 
-// ── stat() / lstat() ──────────────────────────────────────────────────────
+// ── stat() ────────────────────────────────────────────────────────────────
 
 __attribute__((visibility("default")))
 int stat(const char* path, struct stat* buf) {
     if (is_su_path(path)) { fill_fake_su_stat(buf); return 0; }
-    typedef int (*fn_t)(const char*, struct stat*);
-    static fn_t real_fn = nullptr;
-    if (!real_fn) real_fn = (fn_t)dlsym(RTLD_NEXT, "stat");
-    return real_fn ? real_fn(path, buf) : -1;
+    typedef int (*Fn)(const char*, struct stat*);
+    static const Fn real = (Fn)dlsym(RTLD_NEXT, "stat");
+    return real ? real(path, buf) : -1;
 }
+
+// ── lstat() ───────────────────────────────────────────────────────────────
 
 __attribute__((visibility("default")))
 int lstat(const char* path, struct stat* buf) {
     if (is_su_path(path)) { fill_fake_su_stat(buf); return 0; }
-    typedef int (*fn_t)(const char*, struct stat*);
-    static fn_t real_fn = nullptr;
-    if (!real_fn) real_fn = (fn_t)dlsym(RTLD_NEXT, "lstat");
-    return real_fn ? real_fn(path, buf) : -1;
+    typedef int (*Fn)(const char*, struct stat*);
+    static const Fn real = (Fn)dlsym(RTLD_NEXT, "lstat");
+    return real ? real(path, buf) : -1;
 }
 
-// ── __xstat / __lxstat (used by some libc internals) ─────────────────────
+// ── __xstat() — used internally by some Bionic versions ──────────────────
 
 __attribute__((visibility("default")))
 int __xstat(int ver, const char* path, struct stat* buf) {
     if (is_su_path(path)) { fill_fake_su_stat(buf); return 0; }
-    typedef int (*fn_t)(int, const char*, struct stat*);
-    static fn_t real_fn = nullptr;
-    if (!real_fn) real_fn = (fn_t)dlsym(RTLD_NEXT, "__xstat");
-    return real_fn ? real_fn(ver, path, buf) : -1;
+    typedef int (*Fn)(int, const char*, struct stat*);
+    static const Fn real = (Fn)dlsym(RTLD_NEXT, "__xstat");
+    return real ? real(ver, path, buf) : -1;
 }
+
+// ── __lxstat() ────────────────────────────────────────────────────────────
 
 __attribute__((visibility("default")))
 int __lxstat(int ver, const char* path, struct stat* buf) {
     if (is_su_path(path)) { fill_fake_su_stat(buf); return 0; }
-    typedef int (*fn_t)(int, const char*, struct stat*);
-    static fn_t real_fn = nullptr;
-    if (!real_fn) real_fn = (fn_t)dlsym(RTLD_NEXT, "__lxstat");
-    return real_fn ? real_fn(ver, path, buf) : -1;
+    typedef int (*Fn)(int, const char*, struct stat*);
+    static const Fn real = (Fn)dlsym(RTLD_NEXT, "__lxstat");
+    return real ? real(ver, path, buf) : -1;
 }
 
-// ── open() — redirect O_RDONLY on su paths to /dev/null ──────────────────
+// ── open() ────────────────────────────────────────────────────────────────
+//
+// Redirect O_RDONLY opens of su paths to /dev/null so read() succeeds
+// without crashing (apps that open+read to verify binary content).
+// O_CREAT is handled correctly by forwarding the mode_t va_arg.
 
 __attribute__((visibility("default")))
 int open(const char* pathname, int flags, ...) {
-    typedef int (*fn_t)(const char*, int, ...);
-    static fn_t real_fn = nullptr;
-    if (!real_fn) real_fn = (fn_t)dlsym(RTLD_NEXT, "open");
+    typedef int (*Fn)(const char*, int, ...);
+    static const Fn real = (Fn)dlsym(RTLD_NEXT, "open");  // thread-safe init
 
     if (is_su_path(pathname) && (flags & O_ACCMODE) == O_RDONLY) {
         LOGD("open(%s, O_RDONLY) → /dev/null (faked su)", pathname);
-        return real_fn ? real_fn("/dev/null", O_RDONLY) : -1;
+        return real ? real("/dev/null", O_RDONLY) : -1;
     }
-
     if (flags & O_CREAT) {
         va_list ap;
         va_start(ap, flags);
         mode_t mode = (mode_t)va_arg(ap, int);
         va_end(ap);
-        return real_fn ? real_fn(pathname, flags, mode) : -1;
+        return real ? real(pathname, flags, mode) : -1;
     }
-    return real_fn ? real_fn(pathname, flags) : -1;
+    return real ? real(pathname, flags) : -1;
 }
