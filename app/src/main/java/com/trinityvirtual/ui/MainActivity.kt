@@ -360,13 +360,22 @@ class MainActivity : AppCompatActivity() {
 
     // ── Root ──────────────────────────────────────────────────────────
 
+    private var isTogglingRoot = false   // debounce — cegah race start/stop
+
     private fun toggleRoot() {
+        if (isTogglingRoot) return       // abaikan klik ganda saat proses berjalan
         lifecycleScope.launch {
+            isTogglingRoot = true
+            binding.chipRootToggle.isEnabled = false
             try {
                 if (RootEngine.isRootActive) RootEngine.stopRootEnvironment()
                 else RootEngine.startRootEnvironment()
                 updateRootStatus()
             } catch (e: Exception) { showSnackbar("Root toggle gagal: ${e.message}") }
+            finally {
+                isTogglingRoot = false
+                binding.chipRootToggle.isEnabled = true
+            }
         }
     }
 
