@@ -10,17 +10,17 @@ import java.io.File
 import java.util.zip.ZipInputStream
 
 /**
- * ModuleManager — Trinity module lifecycle + Stealth Pre-loader.
+ * ModuleManager - Trinity module lifecycle + Stealth Pre-loader.
  *
  * Stealth Pre-loader:
- *  preloadStealthModules() scans assets/modules/*.so at launch.
- *  Native side: memfd_create() + dlopen("/proc/self/fd/N") — zero filesystem trace.
+ *   preloadStealthModules() scans assets/modules/*.so at launch.
+ *   Native side: memfd_create() + dlopen("/proc/self/fd/N") - zero filesystem trace.
  *
  * ZIP-based install (UI-driven):
- *  installModule(zipPath) — validates ZIP, enforces canonical path to prevent
- *  ZIP slip (path traversal), requires at least one .so or module.prop.
+ *   installModule(zipPath) - validates ZIP, enforces canonical path to prevent
+ *   ZIP slip (path traversal), requires at least one .so or module.prop.
  *
- * nativeLoadModule() takes the ABSOLUTE .so file path directly —
+ * nativeLoadModule() takes the ABSOLUTE .so file path directly -
  * no path composition happens in the native layer.
  */
 object ModuleManager {
@@ -36,10 +36,11 @@ object ModuleManager {
         File(ctx.filesDir, MODULE_DIR_NAME).mkdirs()
     }
 
-    // ── Stealth Asset Pre-loader ─────────────────────────────────────────────
+    // ------- Stealth Asset Pre-loader ----------------------------------------
 
     suspend fun preloadStealthModules(): PreloadResult = withContext(Dispatchers.IO) {
-        var loaded = 0; var failed = 0
+        var loaded = 0
+        var failed = 0
         try {
             val am      = ctx.assets
             val entries = try { am.list(ASSET_MODULE_DIR) } catch (e: Exception) { null }
@@ -53,15 +54,22 @@ object ModuleManager {
                 if (!name.endsWith(".so") && !name.endsWith(".trinity")) continue
                 try {
                     val bytes = am.open("$ASSET_MODULE_DIR/$name").use { it.readBytes() }
-                    if (bytes.isEmpty()) { failed++; Log.e(TAG, "Empty asset: $name"); continue }
+                    if (bytes.isEmpty()) {
+                        failed++
+                        Log.e(TAG, "Empty asset: $name")
+                        continue
+                    }
                     val moduleName = name.removeSuffix(".trinity").removeSuffix(".so")
                     if (nativeLoadModuleFromMemory(bytes, moduleName)) {
-                        loaded++; Log.i(TAG, "Stealth loaded '$moduleName' ✓")
+                        loaded++
+                        Log.i(TAG, "Stealth loaded '$moduleName'")
                     } else {
-                        failed++; Log.e(TAG, "Stealth load failed: '$moduleName'")
+                        failed++
+                        Log.e(TAG, "Stealth load failed: '$moduleName'")
                     }
                 } catch (e: Exception) {
-                    failed++; Log.e(TAG, "Exception loading '$name': ${e.message}")
+                    failed++
+                    Log.e(TAG, "Exception loading '$name': ${e.message}")
                 }
             }
         } catch (e: Exception) {
@@ -75,12 +83,14 @@ object ModuleManager {
         val allSucceeded get() = failed == 0
     }
 
-    // ── ZIP-based install ────────────────────────────────────────────────────
+    // ------- ZIP-based install -----------------------------------------------
 
     /**
      * Install a module from a ZIP file.
      *
      * Security: canonical path check prevents ZIP slip (path traversal).
+     *   outFile.canonicalPath must start with destDir.canonicalPath + File.separator
+     *
      * Validation: requires at least one .so file OR a module.prop in the ZIP.
      *
      * @return TrinityModule on success, null on failure.
@@ -89,7 +99,8 @@ object ModuleManager {
         try {
             val zipFile = File(zipPath)
             if (!zipFile.exists() || zipFile.length() == 0L) {
-                Log.e(TAG, "Invalid ZIP: $zipPath"); return@withContext null
+                Log.e(TAG, "Invalid ZIP: $zipPath")
+                return@withContext null
             }
 
             // Pass 1: read manifest + validate ZIP has usable content
@@ -105,23 +116,26 @@ object ModuleManager {
                 var entry = zis.nextEntry
                 while (entry != null) {
                     when {
-                        entry.name.endsWith(".so")                         -> hasSo   = true
-                        entry.name == "module.prop" ||
-                        entry.name == "META-INF/module.prop"               -> {
+                        entry.name.endsWith(".so") -> {
+                            hasSo = true
+                        }
+                        entry.name == "module.prop" || entry.name == "META-INF/module.prop" -> {
                             hasProp = true
                             val props = zis.bufferedReader().readText()
                             props.lines().forEach { line ->
                                 val kv = line.split("=", limit = 2)
-                                if (kv.size == 2) when (kv[0].trim()) {
-                                    "name"        -> moduleName  = kv[1].trim()
-                                    "version"     -> version     = kv[1].trim()
-                                    "description" -> description = kv[1].trim()
-                                    "author"      -> author      = kv[1].trim()
-                                    "type"        -> moduleType  = when (kv[1].trim().uppercase()) {
-                                        "XPOSED" -> ModuleType.XPOSED
-                                        "SYSTEM" -> ModuleType.SYSTEM
-                                        "SPOOF"  -> ModuleType.SPOOF
-                                        else     -> ModuleType.HOOK
+                                if (kv.size == 2) {
+                                    when (kv[0].trim()) {
+                                        "name"        -> moduleName  = kv[1].trim()
+                                        "version"     -> version     = kv[1].trim()
+                                        "description" -> description = kv[1].trim()
+                                        "author"      -> author      = kv[1].trim()
+                                        "type"        -> moduleType  = when (kv[1].trim().uppercase()) {
+                                            "XPOSED" -> ModuleType.XPOSED
+                                            "SYSTEM" -> ModuleType.SYSTEM
+                                            "SPOOF"  -> ModuleType.SPOOF
+                                            else     -> ModuleType.HOOK
+                                        }
                                     }
                                 }
                             }
@@ -133,20 +147,20 @@ object ModuleManager {
             }
 
             if (!hasSo && !hasProp) {
-                Log.e(TAG, "ZIP rejected: no .so or module.prop found in $zipPath")
+                Log.e(TAG, "ZIP rejected: no .so or module.prop in $zipPath")
                 return@withContext null
             }
 
             // Pass 2: extract with canonical path check (ZIP slip prevention)
-            val destDir          = File(File(ctx.filesDir, MODULE_DIR_NAME), moduleName)
-            val destCanonical    = destDir.canonicalPath + File.separator
+            val destDir       = File(File(ctx.filesDir, MODULE_DIR_NAME), moduleName)
+            val destCanonical = destDir.canonicalPath + File.separator
             destDir.mkdirs()
 
             ZipInputStream(zipFile.inputStream()).use { zis ->
                 var entry = zis.nextEntry
                 while (entry != null) {
                     val outFile = File(destDir, entry.name)
-                    // ZIP slip guard
+                    // ZIP slip guard: reject entries that escape destDir
                     if (!outFile.canonicalPath.startsWith(destCanonical)) {
                         Log.e(TAG, "ZIP slip rejected: ${entry.name}")
                         zis.closeEntry()
@@ -164,7 +178,7 @@ object ModuleManager {
                 }
             }
 
-            Log.i(TAG, "Module installed: $moduleName v$version by $author → ${destDir.path}")
+            Log.i(TAG, "Module installed: $moduleName v$version by $author -> ${destDir.path}")
 
             TrinityModule(
                 name        = moduleName,
@@ -185,11 +199,11 @@ object ModuleManager {
         try {
             val soFile = findLibrary(module.modulePath)
             if (soFile != null) {
-                // Pass absolute .so path — native layer opens it directly
+                // Pass absolute .so path - native layer opens it directly via dlopen
                 val ok = nativeLoadModule(soFile.absolutePath)
-                Log.i(TAG, "enableModule '${module.name}': ${if (ok) "OK ✓" else "FAILED ✗"}")
+                Log.i(TAG, "enableModule '${module.name}': ${if (ok) "OK" else "FAILED"}")
             } else {
-                Log.w(TAG, "No .so in ${module.modulePath} — may already be in-memory")
+                Log.w(TAG, "No .so in ${module.modulePath} - may already be in-memory")
             }
         } catch (e: Exception) {
             Log.e(TAG, "enableModule failed: ${e.message}")
@@ -197,15 +211,20 @@ object ModuleManager {
     }
 
     suspend fun disableModule(module: TrinityModule) = withContext(Dispatchers.IO) {
-        try { nativeUnloadModule(module.name) }
-        catch (e: Exception) { Log.e(TAG, "disableModule failed: ${e.message}") }
+        try {
+            nativeUnloadModule(module.name)
+        } catch (e: Exception) {
+            Log.e(TAG, "disableModule failed: ${e.message}")
+        }
     }
 
     suspend fun uninstallModule(module: TrinityModule) = withContext(Dispatchers.IO) {
         try {
             nativeUnloadModule(module.name)
             File(module.modulePath).deleteRecursively()
-        } catch (e: Exception) { Log.e(TAG, "uninstallModule failed: ${e.message}") }
+        } catch (e: Exception) {
+            Log.e(TAG, "uninstallModule failed: ${e.message}")
+        }
     }
 
     suspend fun getInstalledModules(): List<TrinityModule> = withContext(Dispatchers.IO) {
@@ -226,14 +245,15 @@ object ModuleManager {
                 ?.sortedByDescending { it.installedAt }
                 ?: emptyList()
         } catch (e: Exception) {
-            Log.e(TAG, "getInstalledModules failed", e); emptyList()
+            Log.e(TAG, "getInstalledModules failed", e)
+            emptyList()
         }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
+    // ------- Helpers ---------------------------------------------------------
 
     private fun findLibrary(moduleDir: String): File? {
-        val dir      = File(moduleDir)
+        val dir = File(moduleDir)
         val abiPaths = listOf("lib/arm64-v8a", "lib/armeabi-v7a", "lib/x86_64", "lib", ".")
         for (rel in abiPaths) {
             val so = File(dir, rel).listFiles { f -> f.extension == "so" }?.firstOrNull()
@@ -242,12 +262,12 @@ object ModuleManager {
         return null
     }
 
-    // ── JNI ──────────────────────────────────────────────────────────────────
+    // ------- JNI -------------------------------------------------------------
 
-    /** In-memory load via memfd_create — no filesystem trace. */
+    /** In-memory load via memfd_create - no filesystem trace. */
     external fun nativeLoadModuleFromMemory(data: ByteArray, name: String): Boolean
 
-    /** File-based load — caller passes ABSOLUTE .so path. */
+    /** File-based load - caller passes ABSOLUTE .so path. */
     private external fun nativeLoadModule(soPath: String): Boolean
 
     /** Unload by name (registry). */
