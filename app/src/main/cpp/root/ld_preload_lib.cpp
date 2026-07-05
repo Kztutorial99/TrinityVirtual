@@ -1,26 +1,27 @@
 /**
  * libfakeroot_preload.so — TrinityVirtual LD_PRELOAD injection library.
  *
- * Loaded RTLD_GLOBAL into the host process and all child processes via LD_PRELOAD.
- * Provides three layers of stealth:
+ * Loaded RTLD_GLOBAL into host process + all children via LD_PRELOAD.
+ * Three stealth layers:
  *
  *  Layer 1 — UID/GID spoof:
  *    getuid/geteuid/getgid/getegid → 0
  *
  *  Layer 2 — su binary presence:
- *    access/faccessat/stat/lstat/__xstat/__lxstat/open → fake success for su paths
+ *    access/faccessat/stat/lstat/__xstat/__lxstat/open
  *
  *  Layer 3 — Integrity check bypass:
- *    __system_property_get → return spoofed device values; filter 'qemu'/'goldfish'/'magisk'
- *    fopen("/proc/self/maps") → return memfd with filtered content (hides our libs)
- *    fopen("/proc/self/status") → filter suspicious UID lines
+ *    __system_property_get → Samsung S23 Ultra profile; filter suspicious strings
+ *    fopen + open + openat for /proc/self/maps → memfd with filtered content
+ *    (covers both libc callers AND Java File.readText via open/openat)
  *
- * Exported config API (callable from trinity_spoof via dlsym(RTLD_DEFAULT, ...)):
+ * Exported config API:
  *    void fakeroot_set_prop(const char* key, const char* value)
  *    void fakeroot_add_hidden_pattern(const char* pattern)
  *    void fakeroot_reset_props(void)
  *
- * Thread-safety: all RTLD_NEXT lookups use C++11 thread-safe static-local init.
+ * Thread-safety:
+ *    g_initialized uses std::atomic; contains_pattern reads under lock.
  */
 
 #define _GNU_SOURCE
@@ -37,6 +38,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <pthread.h>
+#include <atomic>
 #include <sys/system_properties.h>
 #include <android/log.h>
 
@@ -45,83 +47,93 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  FAKETAG, __VA_ARGS__)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// § 1 — Configuration tables  (guarded by a single mutex)
+// § 1 — Configuration tables
 // ══════════════════════════════════════════════════════════════════════════════
 
 #define MAX_PROPS    64
 #define MAX_PATTERNS 32
 #define KEY_MAX      92
-#define VAL_MAX      PROP_VALUE_MAX   // 92 on Android
+#define VAL_MAX      PROP_VALUE_MAX   // 92
 
 struct PropEntry { char key[KEY_MAX]; char val[VAL_MAX]; };
 
-static pthread_mutex_t  g_lock       = PTHREAD_MUTEX_INITIALIZER;
-static PropEntry        g_props[MAX_PROPS];
-static int              g_prop_count = 0;
-static char             g_patterns[MAX_PATTERNS][64];
-static int              g_pat_count  = 0;
-static bool             g_initialized = false;
+static pthread_mutex_t       g_lock       = PTHREAD_MUTEX_INITIALIZER;
+static PropEntry             g_props[MAX_PROPS];
+static int                   g_prop_count = 0;
+static char                  g_patterns[MAX_PATTERNS][64];
+static int                   g_pat_count  = 0;
+static std::atomic<bool>     g_initialized{false};
 
-// Default Samsung Galaxy S23 Ultra profile loaded at library init
 static const PropEntry DEFAULT_PROPS[] = {
-    { "ro.product.manufacturer",     "samsung"                                   },
-    { "ro.product.brand",            "samsung"                                   },
-    { "ro.product.model",            "SM-S918B"                                  },
-    { "ro.product.device",           "dm3q"                                      },
-    { "ro.product.name",             "dm3qxxx"                                   },
+    { "ro.product.manufacturer",  "samsung"                                                   },
+    { "ro.product.brand",         "samsung"                                                   },
+    { "ro.product.model",         "SM-S918B"                                                  },
+    { "ro.product.device",        "dm3q"                                                      },
+    { "ro.product.name",          "dm3qxxx"                                                   },
     { "ro.build.fingerprint",
-      "samsung/dm3qxxx/dm3q:13/TP1A.220624.014/S918BXXS3BWF1:user/release-keys" },
-    { "ro.build.version.release",    "13"                                        },
-    { "ro.build.version.sdk",        "33"                                        },
-    { "ro.build.id",                 "TP1A.220624.014"                           },
-    { "ro.build.type",               "user"                                      },
-    { "ro.build.tags",               "release-keys"                              },
-    { "ro.serialno",                 "R5CW301234X"                               },
-    { "ro.hardware",                 "qcom"                                      },
-    { "ro.product.cpu.abi",          "arm64-v8a"                                 },
+      "samsung/dm3qxxx/dm3q:13/TP1A.220624.014/S918BXXS3BWF1:user/release-keys"              },
+    { "ro.build.version.release", "13"                                                        },
+    { "ro.build.version.sdk",     "33"                                                        },
+    { "ro.build.id",              "TP1A.220624.014"                                            },
+    { "ro.build.type",            "user"                                                      },
+    { "ro.build.tags",            "release-keys"                                              },
+    { "ro.serialno",              "R5CW301234X"                                               },
+    { "ro.hardware",              "qcom"                                                      },
+    { "ro.product.cpu.abi",       "arm64-v8a"                                                 },
+    { "ro.secure",                "1"                                                         },
+    { "ro.debuggable",            "0"                                                         },
+    { "ro.boot.verifiedbootstate","green"                                                     },
+    { "ro.boot.veritymode",       "enforcing"                                                 },
 };
 
 static const char* DEFAULT_PATTERNS[] = {
-    "qemu", "goldfish", "ranchu", "magisk", "zygisk",
-    "trinity", "fakeroot", "xposed", "substrate", "frida",
+    "qemu", "goldfish", "ranchu", "android_x86",
+    "magisk", "zygisk", "xposed", "edxposed",
+    "substrate", "frida", "gadget",
+    "trinity", "fakeroot", "virtualapp", "vmos",
+    nullptr
 };
 
 // ── Internal helpers ───────────────────────────────────────────────────────
 
 static void ensure_initialized() {
-    if (g_initialized) return;
+    if (g_initialized.load(std::memory_order_acquire)) return;
     pthread_mutex_lock(&g_lock);
-    if (!g_initialized) {
+    if (!g_initialized.load(std::memory_order_relaxed)) {
         for (auto& e : DEFAULT_PROPS) {
             if (g_prop_count >= MAX_PROPS) break;
             strncpy(g_props[g_prop_count].key, e.key, KEY_MAX - 1);
             strncpy(g_props[g_prop_count].val, e.val, VAL_MAX - 1);
             g_prop_count++;
         }
-        for (auto& p : DEFAULT_PATTERNS) {
+        for (int i = 0; DEFAULT_PATTERNS[i]; i++) {
             if (g_pat_count >= MAX_PATTERNS) break;
-            strncpy(g_patterns[g_pat_count++], p, 63);
+            strncpy(g_patterns[g_pat_count++], DEFAULT_PATTERNS[i], 63);
         }
-        g_initialized = true;
-        LOGI("FakeRoot: prop table loaded (%d props, %d patterns)", g_prop_count, g_pat_count);
+        g_initialized.store(true, std::memory_order_release);
+        LOGI("prop table: %d props, %d patterns", g_prop_count, g_pat_count);
     }
     pthread_mutex_unlock(&g_lock);
 }
 
-static const char* lookup_prop(const char* key) {
-    // Caller holds lock or doesn't need one (read during single-thread init)
+// Must be called with g_lock held (or during single-thread init)
+static const char* lookup_prop_locked(const char* key) {
     for (int i = 0; i < g_prop_count; i++)
         if (strncmp(g_props[i].key, key, KEY_MAX) == 0)
             return g_props[i].val;
     return nullptr;
 }
 
+// Contains_pattern: reads under lock to prevent data race with writers
 static bool contains_pattern(const char* str) {
     if (!str) return false;
-    for (int i = 0; i < g_pat_count; i++)
+    pthread_mutex_lock(&g_lock);
+    bool found = false;
+    for (int i = 0; i < g_pat_count && !found; i++)
         if (g_patterns[i][0] && strcasestr(str, g_patterns[i]))
-            return true;
-    return false;
+            found = true;
+    pthread_mutex_unlock(&g_lock);
+    return found;
 }
 
 static bool is_su_path(const char* path) {
@@ -137,7 +149,7 @@ static bool is_su_path(const char* path) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// § 2 — Exported config API  (called from trinity_spoof via dlsym)
+// § 2 — Exported config API
 // ══════════════════════════════════════════════════════════════════════════════
 
 extern "C" __attribute__((visibility("default")))
@@ -145,21 +157,17 @@ void fakeroot_set_prop(const char* key, const char* value) {
     if (!key || !value) return;
     ensure_initialized();
     pthread_mutex_lock(&g_lock);
-    // Update existing entry
     for (int i = 0; i < g_prop_count; i++) {
         if (strncmp(g_props[i].key, key, KEY_MAX) == 0) {
             strncpy(g_props[i].val, value, VAL_MAX - 1);
             pthread_mutex_unlock(&g_lock);
-            LOGI("prop updated: [%s]=[%s]", key, value);
             return;
         }
     }
-    // New entry
     if (g_prop_count < MAX_PROPS) {
         strncpy(g_props[g_prop_count].key, key,   KEY_MAX - 1);
         strncpy(g_props[g_prop_count].val, value, VAL_MAX - 1);
         g_prop_count++;
-        LOGI("prop added: [%s]=[%s]", key, value);
     }
     pthread_mutex_unlock(&g_lock);
 }
@@ -177,15 +185,15 @@ void fakeroot_add_hidden_pattern(const char* pattern) {
 extern "C" __attribute__((visibility("default")))
 void fakeroot_reset_props() {
     pthread_mutex_lock(&g_lock);
-    g_prop_count  = 0;
-    g_pat_count   = 0;
-    g_initialized = false;
+    g_prop_count = 0;
+    g_pat_count  = 0;
     pthread_mutex_unlock(&g_lock);
-    ensure_initialized(); // reload defaults
+    g_initialized.store(false, std::memory_order_release);
+    ensure_initialized();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// § 3 — UID / GID overrides
+// § 3 — UID / GID
 // ══════════════════════════════════════════════════════════════════════════════
 
 __attribute__((visibility("default"))) uid_t getuid(void)  { return 0; }
@@ -200,38 +208,28 @@ __attribute__((visibility("default"))) gid_t getegid(void) { return 0; }
 __attribute__((visibility("default")))
 int __system_property_get(const char* name, char* value) {
     ensure_initialized();
-
-    // Check our override table first (lock-free read after init via atomic flag)
     pthread_mutex_lock(&g_lock);
-    const char* ov = lookup_prop(name);
+    const char* ov = lookup_prop_locked(name);
     if (ov) {
         strncpy(value, ov, PROP_VALUE_MAX - 1);
         value[PROP_VALUE_MAX - 1] = '\0';
         int len = (int)strlen(value);
         pthread_mutex_unlock(&g_lock);
-        LOGD("prop spoof [%s] → [%s]", name, value);
         return len;
     }
     pthread_mutex_unlock(&g_lock);
 
-    // Fall through to real implementation
     typedef int (*Fn)(const char*, char*);
     static const Fn real = (Fn)dlsym(RTLD_NEXT, "__system_property_get");
     if (!real) { value[0] = '\0'; return 0; }
 
     int ret = real(name, value);
-
-    // Sanitize result: wipe suspicious strings
-    if (ret > 0 && contains_pattern(value)) {
-        LOGD("prop sanitize [%s]: hiding suspicious value", name);
-        value[0] = '\0';
-        ret = 0;
-    }
+    if (ret > 0 && contains_pattern(value)) { value[0] = '\0'; ret = 0; }
     return ret;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// § 5 — su binary presence hooks
+// § 5 — su binary hooks
 // ══════════════════════════════════════════════════════════════════════════════
 
 __attribute__((visibility("default")))
@@ -254,7 +252,6 @@ static void fill_fake_su_stat(struct stat* buf) {
     memset(buf, 0, sizeof(*buf));
     buf->st_mode = S_IFREG | 0755; buf->st_size = 2048;
     buf->st_uid = 0; buf->st_gid = 0; buf->st_nlink = 1;
-    buf->st_blksize = 512; buf->st_blocks = 4;
 }
 
 __attribute__((visibility("default")))
@@ -290,20 +287,36 @@ int __lxstat(int ver, const char* path, struct stat* buf) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// § 6 — /proc/self/maps  and  /proc/self/status  filtering via memfd
+// § 6 — /proc/self/maps  filtering (covers libc + Java/open paths)
+//
+// Three entry points ALL share the same filtered-memfd helper:
+//  • fopen("/proc/self/maps", ...)     — libc callers
+//  • open("/proc/self/maps", ...)      — low-level C callers
+//  • openat(AT_FDCWD, "/proc/self/maps", ...) — Java File / NDK callers
+//
+// This closes the gap found in code review where Java File.readText() used
+// open/openat and bypassed the fopen hook.
 // ══════════════════════════════════════════════════════════════════════════════
+
+#define PROC_MAPS "/proc/self/maps"
 
 static bool should_hide_map_line(const char* line) {
     return contains_pattern(line);
 }
 
-// Create a memfd containing filtered /proc/self/maps
-static int make_filtered_maps_fd(FILE* (*real_fopen)(const char*, const char*)) {
-    FILE* src = real_fopen("/proc/self/maps", "r");
-    if (!src) return -1;
+// Create a memfd containing filtered /proc/self/maps.
+// real_open must be the RTLD_NEXT open so we don't re-enter ourselves.
+static int make_filtered_maps_fd() {
+    typedef int (*open_fn)(const char*, int, ...);
+    static const open_fn real_open = (open_fn)dlsym(RTLD_NEXT, "open");
 
-    // memfd_create: available on Android 8+ (API 26+; our minSdk=28)
-    int mfd = (int)syscall(__NR_memfd_create, "maps_filtered", 1 /*MFD_CLOEXEC*/);
+    int src_fd = real_open ? real_open(PROC_MAPS, O_RDONLY) : -1;
+    if (src_fd < 0) return -1;
+
+    FILE* src = fdopen(src_fd, "r");
+    if (!src) { close(src_fd); return -1; }
+
+    int mfd = (int)syscall(__NR_memfd_create, "maps_clean", 1 /*MFD_CLOEXEC*/);
     if (mfd < 0) { fclose(src); return -1; }
 
     char line[512];
@@ -311,43 +324,44 @@ static int make_filtered_maps_fd(FILE* (*real_fopen)(const char*, const char*)) 
         if (!should_hide_map_line(line))
             write(mfd, line, strlen(line));
     }
-    fclose(src);
+    fclose(src);  // also closes src_fd
     lseek(mfd, 0, SEEK_SET);
     return mfd;
 }
 
+static bool is_proc_maps(const char* path) {
+    return path && strcmp(path, PROC_MAPS) == 0;
+}
+
+// ── fopen hook ────────────────────────────────────────────────────────────────
 __attribute__((visibility("default")))
 FILE* fopen(const char* path, const char* mode) {
     typedef FILE* (*Fn)(const char*, const char*);
     static const Fn real = (Fn)dlsym(RTLD_NEXT, "fopen");
 
-    if (path && strcmp(path, "/proc/self/maps") == 0) {
-        LOGD("fopen(/proc/self/maps) → filtered memfd");
-        int fd = make_filtered_maps_fd(real);
-        if (fd >= 0) {
-            FILE* f = fdopen(fd, "r");
-            if (f) return f;
-            close(fd);
-        }
-        // fallback: return real maps
+    if (is_proc_maps(path)) {
+        int fd = make_filtered_maps_fd();
+        if (fd >= 0) { FILE* f = fdopen(fd, "r"); if (f) return f; close(fd); }
     }
     return real ? real(path, mode) : nullptr;
 }
 
 __attribute__((visibility("default")))
 FILE* fopen64(const char* path, const char* mode) {
-    // fopen64 is an alias on 64-bit; delegate to our fopen
     return fopen(path, mode);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// § 7 — open() for su paths + O_RDONLY redirect
-// ══════════════════════════════════════════════════════════════════════════════
-
+// ── open hook — covers Java File.readText() and NDK low-level callers ─────────
 __attribute__((visibility("default")))
 int open(const char* pathname, int flags, ...) {
     typedef int (*Fn)(const char*, int, ...);
     static const Fn real = (Fn)dlsym(RTLD_NEXT, "open");
+
+    if (is_proc_maps(pathname) && (flags & O_ACCMODE) == O_RDONLY) {
+        int fd = make_filtered_maps_fd();
+        if (fd >= 0) return fd;
+        // fallback: return real maps
+    }
 
     if (is_su_path(pathname) && (flags & O_ACCMODE) == O_RDONLY)
         return real ? real("/dev/null", O_RDONLY) : -1;
@@ -360,13 +374,31 @@ int open(const char* pathname, int flags, ...) {
     return real ? real(pathname, flags) : -1;
 }
 
+// ── openat hook — covers AT_FDCWD callers (ART / JVM file reads) ─────────────
+__attribute__((visibility("default")))
+int openat(int dirfd, const char* pathname, int flags, ...) {
+    typedef int (*Fn)(int, const char*, int, ...);
+    static const Fn real = (Fn)dlsym(RTLD_NEXT, "openat");
+
+    if (is_proc_maps(pathname) && (flags & O_ACCMODE) == O_RDONLY) {
+        int fd = make_filtered_maps_fd();
+        if (fd >= 0) return fd;
+    }
+
+    if (flags & O_CREAT) {
+        va_list ap; va_start(ap, flags);
+        mode_t mode = (mode_t)va_arg(ap, int); va_end(ap);
+        return real ? real(dirfd, pathname, flags, mode) : -1;
+    }
+    return real ? real(dirfd, pathname, flags) : -1;
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
-// § 8 — Library constructor: dump loaded state to logcat
+// § 7 — Constructor
 // ══════════════════════════════════════════════════════════════════════════════
 
 __attribute__((constructor))
 static void fakeroot_init() {
     ensure_initialized();
-    LOGI("libfakeroot_preload loaded — "
-         "uid/prop/maps/su hooks active  sdk_min=28");
+    LOGI("libfakeroot_preload: uid/prop/maps(fopen+open+openat)/su hooks active");
 }

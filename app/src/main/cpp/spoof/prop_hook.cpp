@@ -1,20 +1,20 @@
 /**
  * prop_hook.cpp — TrinityVirtual Active Property Hook Layer
  *
- * This file bridges the JNI world and libfakeroot_preload.so:
- *  • JNI calls from Kotlin/Java configure property overrides
- *  • Calls are forwarded to fakeroot_set_prop() / fakeroot_add_hidden_pattern()
- *    which are exported by libfakeroot_preload (loaded RTLD_GLOBAL)
+ * Bridges JNI ↔ libfakeroot_preload.so config API.
+ * prop_hook.cpp calls fakeroot_set_prop / fakeroot_add_hidden_pattern
+ * via dlsym(RTLD_DEFAULT) — no link-time dep on fakeroot_preload.
  *
- * Additionally provides:
- *  • nativeApplyIntegrityBypass() — loads a comprehensive Samsung device profile
- *  • nativeCheckPropIntegrity()   — verifies hooks are responding correctly
- *  • nativeSanitizeString()       — strips suspicious patterns from a string
+ * nativeApplyIntegrityBypass():
+ *   Returns true ONLY when fakeroot_set_prop is actually reachable.
+ *   Returns false if preload lib is not loaded yet (Kotlin can retry/warn).
  */
 
 #include <jni.h>
+#include <cctype>
+#include <cerrno>
+#include <cstring>
 #include <dlfcn.h>
-#include <string.h>
 #include <sys/system_properties.h>
 #include <android/log.h>
 #include <string>
@@ -25,32 +25,26 @@
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-// ── Types for exported symbols in libfakeroot_preload ─────────────────────
 typedef void (*fn_set_prop_t)    (const char*, const char*);
 typedef void (*fn_add_pattern_t) (const char*);
 typedef void (*fn_reset_props_t) (void);
 
-// ── Resolve fakeroot API (preload lib is RTLD_GLOBAL so RTLD_DEFAULT works) ─
 static fn_set_prop_t get_set_prop() {
     static const fn_set_prop_t fn =
         (fn_set_prop_t)dlsym(RTLD_DEFAULT, "fakeroot_set_prop");
-    if (!fn) LOGE("fakeroot_set_prop not found — preload lib not loaded?");
     return fn;
 }
-
 static fn_add_pattern_t get_add_pattern() {
     static const fn_add_pattern_t fn =
         (fn_add_pattern_t)dlsym(RTLD_DEFAULT, "fakeroot_add_hidden_pattern");
     return fn;
 }
-
 static fn_reset_props_t get_reset_props() {
     static const fn_reset_props_t fn =
         (fn_reset_props_t)dlsym(RTLD_DEFAULT, "fakeroot_reset_props");
     return fn;
 }
 
-// ── Suspicious keyword list ────────────────────────────────────────────────
 static const char* SUSPICIOUS_PATTERNS[] = {
     "qemu", "goldfish", "ranchu", "android_x86",
     "magisk", "zygisk", "xposed", "edxposed",
@@ -60,7 +54,6 @@ static const char* SUSPICIOUS_PATTERNS[] = {
     nullptr
 };
 
-// ── Samsung Galaxy S23 Ultra full device profile ───────────────────────────
 static const std::pair<const char*, const char*> SAMSUNG_S23_PROFILE[] = {
     { "ro.product.manufacturer",     "samsung"                                              },
     { "ro.product.brand",            "samsung"                                              },
@@ -88,59 +81,53 @@ static const std::pair<const char*, const char*> SAMSUNG_S23_PROFILE[] = {
     { "ro.boot.veritymode",          "enforcing"                                            },
     { "ro.secure",                   "1"                                                    },
     { "ro.debuggable",               "0"                                                    },
-    { "persist.sys.usb.config",      "adb"                                                  },
     { nullptr, nullptr }
 };
 
-// ── Internal helpers ───────────────────────────────────────────────────────
-
-static void apply_profile(const std::pair<const char*, const char*>* profile) {
-    fn_set_prop_t set_prop = get_set_prop();
-    if (!set_prop) { LOGE("Cannot apply profile — fakeroot_set_prop unavailable"); return; }
-    for (int i = 0; profile[i].first != nullptr; i++) {
-        set_prop(profile[i].first, profile[i].second);
-    }
-}
-
-// Remove suspicious substrings from value in-place
-static void sanitize_value(std::string& val) {
+static void sanitize_value_impl(std::string& val) {
     for (int i = 0; SUSPICIOUS_PATTERNS[i]; i++) {
         const char* pat = SUSPICIOUS_PATTERNS[i];
         size_t pos;
-        std::string lower_val = val;
-        for (char& c : lower_val) c = tolower(c);
-        while ((pos = lower_val.find(pat)) != std::string::npos) {
+        std::string lower = val;
+        for (char& c : lower) c = (char)tolower((unsigned char)c);
+        std::string lower_pat = pat;
+        for (char& c : lower_pat) c = (char)tolower((unsigned char)c);
+        while ((pos = lower.find(lower_pat)) != std::string::npos) {
             val.erase(pos, strlen(pat));
-            lower_val.erase(pos, strlen(pat));
+            lower.erase(pos, strlen(pat));
         }
     }
 }
 
-// ── Local prop override store (used by add/get/clear legacy API) ──────────
 static std::map<std::string, std::string> g_local_overrides;
 
 // ══════════════════════════════════════════════════════════════════════════════
 // JNI — nativeApplyIntegrityBypass
+// Returns TRUE only when fakeroot_set_prop is actually reachable.
 // ══════════════════════════════════════════════════════════════════════════════
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_trinityvirtual_spoof_PropHookManager_nativeApplyIntegrityBypass(
         JNIEnv* /*env*/, jobject /*thiz*/) {
 
-    LOGI("Applying integrity bypass — Samsung S23 Ultra profile");
-
-    // 1. Apply device property profile
-    apply_profile(SAMSUNG_S23_PROFILE);
-
-    // 2. Register all suspicious patterns for filtering
+    fn_set_prop_t    set_prop    = get_set_prop();
     fn_add_pattern_t add_pattern = get_add_pattern();
-    if (add_pattern) {
-        for (int i = 0; SUSPICIOUS_PATTERNS[i]; i++)
-            add_pattern(SUSPICIOUS_PATTERNS[i]);
+
+    if (!set_prop) {
+        LOGE("fakeroot_set_prop not found — preload lib not loaded yet, returning false");
+        return JNI_FALSE;   // ← correct: don't claim success if hooks are inactive
     }
 
-    LOGI("Integrity bypass applied: %zu props, patterns registered",
-         sizeof(SAMSUNG_S23_PROFILE)/sizeof(SAMSUNG_S23_PROFILE[0]) - 1);
+    // Apply Samsung S23 Ultra profile
+    for (int i = 0; SAMSUNG_S23_PROFILE[i].first; i++)
+        set_prop(SAMSUNG_S23_PROFILE[i].first, SAMSUNG_S23_PROFILE[i].second);
+
+    // Register all suspicious patterns
+    if (add_pattern)
+        for (int i = 0; SUSPICIOUS_PATTERNS[i]; i++)
+            add_pattern(SUSPICIOUS_PATTERNS[i]);
+
+    LOGI("Integrity bypass applied via fakeroot_preload API");
     return JNI_TRUE;
 }
 
@@ -154,12 +141,9 @@ Java_com_trinityvirtual_spoof_PropHookManager_nativeSetPropOverride(
 
     const char* key = env->GetStringUTFChars(key_j, nullptr);
     const char* val = env->GetStringUTFChars(val_j, nullptr);
-
-    fn_set_prop_t set_prop = get_set_prop();
-    if (set_prop) set_prop(key, val);
-
+    fn_set_prop_t fn = get_set_prop();
+    if (fn) fn(key, val);
     g_local_overrides[key] = val;
-
     env->ReleaseStringUTFChars(key_j, key);
     env->ReleaseStringUTFChars(val_j, val);
 }
@@ -173,53 +157,43 @@ Java_com_trinityvirtual_spoof_PropHookManager_nativeAddHiddenPattern(
         JNIEnv* env, jobject /*thiz*/, jstring pattern_j) {
 
     const char* pat = env->GetStringUTFChars(pattern_j, nullptr);
-    fn_add_pattern_t add = get_add_pattern();
-    if (add) add(pat);
+    fn_add_pattern_t fn = get_add_pattern();
+    if (fn) fn(pat);
     env->ReleaseStringUTFChars(pattern_j, pat);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // JNI — nativeCheckPropIntegrity
-// Reads key props via __system_property_get and verifies they return
-// our spoofed values (not qemu/emulator defaults).
-// Returns true if all integrity checks pass.
 // ══════════════════════════════════════════════════════════════════════════════
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_trinityvirtual_spoof_PropHookManager_nativeCheckPropIntegrity(
         JNIEnv* /*env*/, jobject /*thiz*/) {
 
-    const char* check_keys[] = {
-        "ro.product.brand",
-        "ro.build.fingerprint",
-        "ro.hardware",
-        nullptr
+    const char* keys[] = {
+        "ro.product.brand", "ro.build.fingerprint", "ro.hardware", nullptr
     };
 
     bool all_ok = true;
-    for (int i = 0; check_keys[i]; i++) {
+    for (int i = 0; keys[i]; i++) {
         char val[PROP_VALUE_MAX] = {};
-        __system_property_get(check_keys[i], val);
-        bool suspicious = false;
+        __system_property_get(keys[i], val);
+        bool bad = false;
         for (int j = 0; SUSPICIOUS_PATTERNS[j]; j++) {
-            if (strcasestr(val, SUSPICIOUS_PATTERNS[j])) {
-                suspicious = true;
-                LOGE("INTEGRITY FAIL: [%s] = [%s] contains pattern [%s]",
-                     check_keys[i], val, SUSPICIOUS_PATTERNS[j]);
-                all_ok = false;
-                break;
-            }
+            if (strcasestr(val, SUSPICIOUS_PATTERNS[j])) { bad = true; break; }
         }
-        if (!suspicious)
-            LOGI("INTEGRITY OK: [%s] = [%s]", check_keys[i], val);
+        if (bad) {
+            LOGE("INTEGRITY FAIL: [%s]=[%s]", keys[i], val);
+            all_ok = false;
+        } else {
+            LOGI("INTEGRITY OK:   [%s]=[%s]", keys[i], val);
+        }
     }
     return all_ok ? JNI_TRUE : JNI_FALSE;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // JNI — nativeSanitizeString
-// Strips all suspicious patterns from an arbitrary string.
-// Useful for sanitizing output before it reaches anti-cheat checks.
 // ══════════════════════════════════════════════════════════════════════════════
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -229,19 +203,18 @@ Java_com_trinityvirtual_spoof_PropHookManager_nativeSanitizeString(
     const char* raw = env->GetStringUTFChars(input_j, nullptr);
     std::string val(raw);
     env->ReleaseStringUTFChars(input_j, raw);
-    sanitize_value(val);
+    sanitize_value_impl(val);
     return env->NewStringUTF(val.c_str());
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Legacy C API — keep existing callers working
+// Legacy C API
 // ══════════════════════════════════════════════════════════════════════════════
 
 void add_prop_override(const char* key, const char* value) {
-    fn_set_prop_t set_prop = get_set_prop();
-    if (set_prop) set_prop(key, value);
+    fn_set_prop_t fn = get_set_prop();
+    if (fn) fn(key, value);
     if (key && value) g_local_overrides[key] = value;
-    LOGI("Legacy add_prop_override: [%s]=[%s]", key, value);
 }
 
 const char* get_prop_override(const char* key) {
@@ -250,7 +223,7 @@ const char* get_prop_override(const char* key) {
 }
 
 void clear_prop_overrides() {
-    fn_reset_props_t reset = get_reset_props();
-    if (reset) reset();
+    fn_reset_props_t fn = get_reset_props();
+    if (fn) fn();
     g_local_overrides.clear();
 }
