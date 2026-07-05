@@ -2,33 +2,21 @@ package com.trinityvirtual
 
 import android.app.Application
 import android.content.Context
-import com.trinityvirtual.engine.VirtualCore
-import com.trinityvirtual.engine.RootEngine
-import com.trinityvirtual.spoof.DeviceSpoofManager
 
-class TrinityApp : Application() {
+/**
+ * TrinityApp — singleton accessor untuk Application context.
+ * Application class aktif: TrinityApplication (terdaftar di AndroidManifest.xml)
+ * File ini hanya menyediakan static accessor agar komponen lain bisa akses context.
+ */
+object TrinityApp {
 
-    companion object {
-        lateinit var instance: TrinityApp
-            private set
+    private lateinit var _instance: Application
 
-        fun get(): TrinityApp = instance
+    fun init(app: Application) {
+        _instance = app
     }
 
-    override fun attachBaseContext(base: Context) {
-        super.attachBaseContext(base)
-        instance = this
-    }
+    fun get(): Application = _instance
 
-    override fun onCreate() {
-        super.onCreate()
-        instance = this
-        initEngines()
-    }
-
-    private fun initEngines() {
-        VirtualCore.init(this)
-        RootEngine.init(this)
-        DeviceSpoofManager.init(this)
-    }
+    fun context(): Context = _instance.applicationContext
 }
