@@ -45,12 +45,16 @@
         </LinearLayout>
 
         <com.google.android.material.chip.Chip
+            style="@style/Widget.MaterialComponents.Chip.Action"
             android:id="@+id/chipRootToggle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Virtual Root"
             android:textColor="@color/on_primary"
             android:textSize="11sp"
+            android:clickable="true"
+            android:focusable="true"
+            app:checkable="false"
             app:chipBackgroundColor="@color/root_inactive"
             app:chipStrokeWidth="0dp"
             app:chipMinHeight="32dp"/>
