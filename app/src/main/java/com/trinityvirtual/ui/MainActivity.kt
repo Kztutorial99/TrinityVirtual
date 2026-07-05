@@ -2,6 +2,7 @@ package com.trinityvirtual.ui
 
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
@@ -17,7 +18,10 @@ import com.trinityvirtual.engine.RootEngine
 import com.trinityvirtual.engine.TrinityDatabase
 import com.trinityvirtual.engine.VirtualCore
 import com.trinityvirtual.model.VirtualApp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
@@ -30,7 +34,15 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setSupportActionBar(binding.toolbar)
-        db = TrinityDatabase.getInstance(this)
+
+        try {
+            db = TrinityDatabase.getInstance(this)
+            VirtualCore.init(this)
+            RootEngine.init(this)
+        } catch (e: Exception) {
+            Log.e("TrinityMain", "Init error: ${e.message}", e)
+        }
+
         setupRecycler()
         setupButtons()
         loadApps()
@@ -61,75 +73,104 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun pickApk() {
-        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-            type = "application/vnd.android.package-archive"
-            addCategory(Intent.CATEGORY_OPENABLE)
+        try {
+            val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                type = "*/*"
+                addCategory(Intent.CATEGORY_OPENABLE)
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
+                    "application/vnd.android.package-archive",
+                    "application/octet-stream"
+                ))
+            }
+            startActivityForResult(Intent.createChooser(intent, "Pilih APK"), REQ_APK)
+        } catch (e: Exception) {
+            showSnackbar("Tidak bisa membuka file picker: ${e.message}")
         }
-        startActivityForResult(Intent.createChooser(intent, "Pilih APK"), REQ_APK)
     }
 
+    @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQ_APK && resultCode == RESULT_OK) {
-            data?.data?.let { uri ->
-                lifecycleScope.launch {
-                    val tempFile = java.io.File(cacheDir, "install_temp.apk")
-                    contentResolver.openInputStream(uri)?.use { input ->
-                        tempFile.outputStream().use { output -> input.copyTo(output) }
+            val uri = data?.data ?: return
+            lifecycleScope.launch {
+                try {
+                    binding.progressBar.visibility = View.VISIBLE
+                    binding.tvStatus.text = getString(R.string.installing)
+
+                    val tempFile = withContext(Dispatchers.IO) {
+                        val file = File(cacheDir, "install_temp_${System.currentTimeMillis()}.apk")
+                        contentResolver.openInputStream(uri)?.use { input ->
+                            file.outputStream().use { output -> input.copyTo(output) }
+                        }
+                        file
                     }
-                    installApk(tempFile.absolutePath)
+
+                    if (!tempFile.exists() || tempFile.length() == 0L) {
+                        showSnackbar("File APK kosong atau tidak valid!")
+                        return@launch
+                    }
+
+                    val app = VirtualCore.installApk(tempFile.absolutePath)
+                    if (app != null) {
+                        db.virtualAppDao().insert(app)
+                        showSnackbar("${app.appName} berhasil diinstall!")
+                        loadApps()
+                    } else {
+                        showSnackbar(getString(R.string.install_failed))
+                    }
+                } catch (e: Exception) {
+                    Log.e("TrinityMain", "Install error: ${e.message}", e)
+                    showSnackbar("Error: ${e.message ?: "Unknown error"}")
+                } finally {
+                    binding.progressBar.visibility = View.GONE
+                    binding.tvStatus.text = ""
                 }
             }
         }
     }
 
-    private suspend fun installApk(path: String) {
-        binding.progressBar.visibility = View.VISIBLE
-        binding.tvStatus.text = getString(R.string.installing)
-        val app = VirtualCore.installApk(path)
-        if (app != null) {
-            db.virtualAppDao().insert(app)
-            Snackbar.make(binding.root, "${app.appName} berhasil diinstall!", Snackbar.LENGTH_SHORT).show()
-            loadApps()
-        } else {
-            Snackbar.make(binding.root, getString(R.string.install_failed), Snackbar.LENGTH_SHORT).show()
-        }
-        binding.progressBar.visibility = View.GONE
-        binding.tvStatus.text = ""
-    }
-
     private fun loadApps() {
         lifecycleScope.launch {
-            val apps = db.virtualAppDao().getAll()
-            adapter.submitList(apps)
-            binding.tvEmpty.visibility = if (apps.isEmpty()) View.VISIBLE else View.GONE
-            binding.tvAppCount.text = getString(R.string.app_count, apps.size)
+            try {
+                val apps = db.virtualAppDao().getAll()
+                adapter.submitList(apps)
+                binding.tvEmpty.visibility = if (apps.isEmpty()) View.VISIBLE else View.GONE
+                binding.tvAppCount.text = getString(R.string.app_count, apps.size)
+            } catch (e: Exception) {
+                Log.e("TrinityMain", "Load error: ${e.message}", e)
+            }
         }
     }
 
     private fun toggleRoot() {
         lifecycleScope.launch {
-            if (RootEngine.isRootActive) {
-                RootEngine.stopRootEnvironment()
-            } else {
-                RootEngine.startRootEnvironment()
+            try {
+                if (RootEngine.isRootActive) RootEngine.stopRootEnvironment()
+                else RootEngine.startRootEnvironment()
+                updateRootStatus()
+            } catch (e: Exception) {
+                Log.e("TrinityMain", "Root toggle error: ${e.message}", e)
             }
-            updateRootStatus()
         }
     }
 
     private fun updateRootStatus() {
-        val status = RootEngine.checkRootStatus()
-        binding.tvRootStatus.text = when (status) {
-            RootEngine.RootStatus.ROOTED -> "Root: Aktif (Real)"
-            RootEngine.RootStatus.VIRTUAL_ROOT -> "Root: Aktif (Virtual)"
-            RootEngine.RootStatus.NO_ROOT -> "Root: Tidak Aktif"
+        try {
+            val status = RootEngine.checkRootStatus()
+            binding.tvRootStatus.text = when (status) {
+                RootEngine.RootStatus.ROOTED -> "Root: Aktif (Real)"
+                RootEngine.RootStatus.VIRTUAL_ROOT -> "Root: Aktif (Virtual)"
+                RootEngine.RootStatus.NO_ROOT -> "Root: Tidak Aktif"
+            }
+            val color = when (status) {
+                RootEngine.RootStatus.NO_ROOT -> getColor(R.color.root_inactive)
+                else -> getColor(R.color.root_active)
+            }
+            binding.cardRootStatus.setCardBackgroundColor(color)
+        } catch (e: Exception) {
+            Log.e("TrinityMain", "Status update error: ${e.message}", e)
         }
-        val color = when (status) {
-            RootEngine.RootStatus.NO_ROOT -> getColor(R.color.root_inactive)
-            else -> getColor(R.color.root_active)
-        }
-        binding.cardRootStatus.setCardBackgroundColor(color)
     }
 
     private fun launchVirtualApp(app: VirtualApp) {
@@ -155,8 +196,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun toggleAppRoot(app: VirtualApp) {
         lifecycleScope.launch {
-            db.virtualAppDao().setRootEnabled(app.id, !app.rootEnabled)
-            loadApps()
+            try {
+                db.virtualAppDao().setRootEnabled(app.id, !app.rootEnabled)
+                loadApps()
+            } catch (e: Exception) {
+                Log.e("TrinityMain", "Toggle root error: ${e.message}", e)
+            }
         }
     }
 
@@ -165,11 +210,19 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Hapus ${app.appName}?")
             .setPositiveButton("Hapus") { _, _ ->
                 lifecycleScope.launch {
-                    db.virtualAppDao().delete(app)
-                    VirtualCore.deleteApp(app.apkPath)
-                    loadApps()
+                    try {
+                        db.virtualAppDao().delete(app)
+                        VirtualCore.deleteApp(app.apkPath)
+                        loadApps()
+                    } catch (e: Exception) {
+                        Log.e("TrinityMain", "Delete error: ${e.message}", e)
+                    }
                 }
             }.setNegativeButton("Batal", null).show()
+    }
+
+    private fun showSnackbar(msg: String) {
+        Snackbar.make(binding.root, msg, Snackbar.LENGTH_LONG).show()
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -179,14 +232,16 @@ class MainActivity : AppCompatActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
-            R.id.action_settings -> {
-                startActivity(Intent(this, SettingsActivity::class.java)); true
-            }
+            R.id.action_settings -> { startActivity(Intent(this, SettingsActivity::class.java)); true }
             else -> super.onOptionsItemSelected(item)
         }
     }
 
-    override fun onResume() { super.onResume(); loadApps(); updateRootStatus() }
+    override fun onResume() {
+        super.onResume()
+        loadApps()
+        updateRootStatus()
+    }
 
     companion object { private const val REQ_APK = 1001 }
 }
