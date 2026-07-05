@@ -54,7 +54,7 @@
             android:textSize="11sp"
             android:clickable="true"
             android:focusable="true"
-            app:checkable="false"
+            android:checkable="false"
             app:chipBackgroundColor="@color/root_inactive"
             app:chipStrokeWidth="0dp"
             app:chipMinHeight="32dp"/>
