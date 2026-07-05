@@ -24,6 +24,9 @@ interface VirtualAppDao {
 
     @Query("UPDATE virtual_apps SET rootEnabled = :enabled WHERE id = :id")
     suspend fun setRootEnabled(id: Long, enabled: Boolean)
+
+    @Query("UPDATE virtual_apps SET spoofEnabled = :enabled WHERE id = :id")
+    suspend fun setSpoofEnabled(id: Long, enabled: Boolean)
 }
 
 @Dao
@@ -43,7 +46,7 @@ interface ModuleDao {
 
 @Database(
     entities = [VirtualApp::class, TrinityModule::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class TrinityDatabase : RoomDatabase() {
@@ -52,10 +55,17 @@ abstract class TrinityDatabase : RoomDatabase() {
 
     companion object {
         @Volatile private var INSTANCE: TrinityDatabase? = null
+
         fun getInstance(context: Context): TrinityDatabase =
             INSTANCE ?: synchronized(this) {
-                Room.databaseBuilder(context.applicationContext, TrinityDatabase::class.java, "trinity_db")
-                    .build().also { INSTANCE = it }
+                INSTANCE ?: Room.databaseBuilder(
+                    context.applicationContext,
+                    TrinityDatabase::class.java,
+                    "trinity_db"
+                )
+                .fallbackToDestructiveMigration()
+                .build()
+                .also { INSTANCE = it }
             }
     }
 }
