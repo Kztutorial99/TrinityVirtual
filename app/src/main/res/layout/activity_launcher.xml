@@ -4,42 +4,140 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="@color/surface">
+    android:background="@color/bg_base"
+    android:fitsSystemWindows="true">
 
     <com.google.android.material.appbar.AppBarLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@color/primary_dark">
+        android:background="@color/bg_surface"
+        app:elevation="4dp">
+
         <androidx.appcompat.widget.Toolbar
             android:id="@+id/toolbar"
             android:layout_width="match_parent"
             android:layout_height="?attr/actionBarSize"
-            android:titleTextColor="@color/on_primary"
-            app:navigationIconTint="@color/on_primary"/>
+            android:titleTextColor="@color/on_surface"
+            app:navigationIconTint="@color/on_surface"/>
     </com.google.android.material.appbar.AppBarLayout>
 
-    <LinearLayout android:layout_width="match_parent" android:layout_height="match_parent"
-        android:orientation="vertical" android:gravity="center" android:padding="24dp">
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
 
-        <TextView android:id="@+id/tvAppName" android:layout_width="wrap_content"
-            android:layout_height="wrap_content" android:textColor="@color/on_primary"
-            android:textSize="22sp" android:textStyle="bold" android:layout_marginBottom="8dp"/>
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="20dp">
 
-        <TextView android:id="@+id/tvRootInfo" android:layout_width="wrap_content"
-            android:layout_height="wrap_content" android:textColor="@color/accent_bright"
-            android:textSize="14sp" android:layout_marginBottom="8dp"/>
+            <!-- App info card -->
+            <androidx.cardview.widget.CardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="14dp"
+                app:cardBackgroundColor="@color/bg_card"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp">
 
-        <TextView android:id="@+id/tvApkPath" android:layout_width="wrap_content"
-            android:layout_height="wrap_content" android:textColor="@color/on_surface_variant"
-            android:textSize="11sp" android:layout_marginBottom="32dp"/>
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="20dp"
+                    android:gravity="center">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnLaunchApp" android:layout_width="wrap_content"
-            android:layout_height="wrap_content" android:text="Launch in Virtual Environment"
-            app:backgroundTint="@color/accent_bright"/>
+                    <TextView
+                        android:id="@+id/tvAppName"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/on_surface"
+                        android:textSize="20sp"
+                        android:textStyle="bold"
+                        android:gravity="center"
+                        android:layout_marginBottom="6dp"/>
 
-        <TextView android:id="@+id/tvStatus" android:layout_width="wrap_content"
-            android:layout_height="wrap_content" android:layout_marginTop="16dp"
-            android:textColor="@color/on_surface_variant" android:textSize="13sp"/>
-    </LinearLayout>
+                    <TextView
+                        android:id="@+id/tvApkPath"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/on_surface_variant"
+                        android:textSize="11sp"
+                        android:gravity="center"
+                        android:lineSpacingExtra="2dp"
+                        android:layout_marginBottom="12dp"/>
+
+                    <TextView
+                        android:id="@+id/tvRootInfo"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/secondary"
+                        android:textSize="12sp"
+                        android:gravity="center"
+                        android:background="@color/bg_base"
+                        android:paddingVertical="8dp"
+                        android:paddingHorizontal="12dp"/>
+                </LinearLayout>
+            </androidx.cardview.widget.CardView>
+
+            <!-- Virtual Launch button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnLaunchApp"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:layout_marginBottom="10dp"
+                android:text="Launch di Virtual Environment"
+                android:textColor="@color/on_primary"
+                android:textSize="14sp"
+                app:backgroundTint="@color/primary"
+                app:cornerRadius="14dp"
+                app:icon="@android:drawable/ic_media_play"
+                app:iconTint="@color/on_primary"
+                app:iconGravity="textStart"/>
+
+            <!-- System Install fallback button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnInstallSystem"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:layout_marginBottom="20dp"
+                android:text="Install ke Sistem (Fallback)"
+                android:textColor="@color/secondary"
+                android:textSize="14sp"
+                app:strokeColor="@color/secondary"
+                app:cornerRadius="14dp"/>
+
+            <!-- Status message -->
+            <androidx.cardview.widget.CardView
+                android:id="@+id/cardStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                app:cardBackgroundColor="@color/bg_card"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="0dp">
+
+                <TextView
+                    android:id="@+id/tvStatus"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:padding="16dp"
+                    android:textColor="@color/on_surface_variant"
+                    android:textSize="13sp"
+                    android:lineSpacingExtra="3dp"
+                    android:visibility="gone"/>
+            </androidx.cardview.widget.CardView>
+
+            <!-- Info note -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:text="Virtual launch menggunakan namespace Linux + su interceptor dari RootEngine. Tanpa root, gunakan Install Sistem agar APK bisa dibuka."
+                android:textColor="@color/on_surface_muted"
+                android:textSize="11sp"
+                android:gravity="center"
+                android:lineSpacingExtra="3dp"/>
+        </LinearLayout>
+    </ScrollView>
 </LinearLayout>
