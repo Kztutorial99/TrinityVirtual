@@ -68,21 +68,32 @@ jobs:
           echo "=== Debug APK ===" && $BUILD_TOOLS/apksigner verify --verbose app/build/outputs/apk/debug/*.apk | head -5
           echo "=== Release APK ===" && $BUILD_TOOLS/apksigner verify --verbose app/build/outputs/apk/release/*.apk | head -5
 
-      - name: Verify libfakeroot_preload has no c++ shared dependency
+      - name: Verify libfakeroot_preload has no libc++_shared dependency
         run: |
+          # libfakeroot_preload.so is injected via LD_PRELOAD into external processes (sh, popen children).
+          # If it depends on libc++_shared.so, those processes abort at linker time because
+          # libc++_shared.so is not in the system linker namespace — only the app's private lib dir.
+          # This step enforces ANDROID_STL=c++_static is in effect for this library.
           APK=app/build/outputs/apk/debug/*.apk
           mkdir -p /tmp/apk_check
-          unzip -q "$APK" "lib/arm64-v8a/libfakeroot_preload.so" -d /tmp/apk_check 2>/dev/null || \
-          unzip -q "$APK" "lib/armeabi-v7a/libfakeroot_preload.so" -d /tmp/apk_check 2>/dev/null || true
+          unzip -q "$APK" "lib/arm64-v8a/libfakeroot_preload.so" -d /tmp/apk_check 2>/dev/null \
+            || unzip -q "$APK" "lib/armeabi-v7a/libfakeroot_preload.so" -d /tmp/apk_check 2>/dev/null \
+            || true
+          FOUND=0
           for SO in $(find /tmp/apk_check -name "libfakeroot_preload.so"); do
-            echo "Checking: $SO"
-            readelf -d "$SO" | grep NEEDED
+            FOUND=1
+            echo "Checking DT_NEEDED for: $SO"
+            readelf -d "$SO" | grep NEEDED || echo "(no NEEDED entries)"
             if readelf -d "$SO" | grep -q "libc++_shared.so"; then
-              echo "FAIL: libfakeroot_preload.so still depends on libc++_shared.so — will break LD_PRELOAD injection"
+              echo "::error::libfakeroot_preload.so depends on libc++_shared.so — LD_PRELOAD injection will fail!"
+              echo "::error::Change ANDROID_STL back to c++_static in app/build.gradle"
               exit 1
             fi
-            echo "OK: libc++_shared.so not in NEEDED list"
+            echo "OK: libc++_shared.so not in NEEDED — preload library is self-contained"
           done
+          if [ "$FOUND" -eq 0 ]; then
+            echo "WARNING: libfakeroot_preload.so not found in APK — skipping DT_NEEDED check"
+          fi
 
       - name: Upload Signed Debug APK
         uses: actions/upload-artifact@v4
