@@ -16,6 +16,8 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <cerrno>
+#include <cstring>
 #include <android/log.h>
 #include "namespace_manager.h"
 #include "su_interceptor.h"
@@ -114,10 +116,23 @@ Java_com_trinityvirtual_engine_RootEngine_nativeExecuteRoot(
         if (pipe) {
             char buf[256];
             while (fgets(buf, sizeof(buf), pipe)) result += buf;
-            pclose(pipe);
+            int exit_code = pclose(pipe);
+            if (exit_code != 0 && result.empty()) {
+                char errbuf[64];
+                snprintf(errbuf, sizeof(errbuf), "Warning: command exited with code %d", exit_code);
+                result = errbuf;
+            }
         } else {
-            result = "Error: popen failed";
-            LOGE("popen failed for command: %s", cmd);
+            // popen() returns NULL when the shell cannot be launched.
+            // Common cause: LD_PRELOAD library has unresolved DT_NEEDED entries
+            // (e.g. libc++_shared.so not found in default linker namespace).
+            int err = errno;
+            char errbuf[160];
+            snprintf(errbuf, sizeof(errbuf),
+                     "Error: popen gagal (errno=%d: %s) — cek logcat untuk CANNOT LINK EXECUTABLE",
+                     err, strerror(err));
+            result = errbuf;
+            LOGE("popen failed: errno=%d (%s) | cmd: %s", err, strerror(err), cmd);
         }
     } else {
         result = "Error: Virtual root not active";
